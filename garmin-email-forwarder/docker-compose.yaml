@@ -1,0 +1,14 @@
+services:
+  garmin-email-forwarder:
+    image: ghcr.io/palchrb/garmin-email-forwarder:latest
+    container_name: garmin-email-forwarder
+    restart: unless-stopped
+    volumes:
+      # Mount a directory that contains config.yaml and stores the session.
+      - ./data:/data
+    # To run login interactively:
+    #   docker compose run --rm garmin-email-forwarder login -config /data/config.yaml
+    # To check status:
+    #   docker compose run --rm garmin-email-forwarder status -config /data/config.yaml
+    # To send a test email:
+    #   docker compose run --rm garmin-email-forwarder test-smtp -config /data/config.yaml
