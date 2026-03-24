@@ -10,6 +10,11 @@ func decode(data []byte, key byte) string {
 
 const xk = 0x5A
 
+// GarminVersionCode is the app versionCode from AndroidManifest.xml.
+// Not verified by Google's servers but must be present in the register3 form.
+// Run: aapt dump badging garmin.apk | grep versionCode  to update.
+const GarminVersionCode = "160500"
+
 var (
 	GarminSenderID    string
 	GarminAPKCertSHA1 string

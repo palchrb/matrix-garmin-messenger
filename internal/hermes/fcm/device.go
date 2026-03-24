@@ -22,6 +22,10 @@ type AndroidDeviceInfo struct {
 	// ChromeVersion is the Chrome browser version (for compatibility)
 	ChromeVersion string
 
+	// FirebaseIIDVersion is the Firebase Instance ID library version string
+	// used in the X-cliv header during FCM registration (format: "fiid-X.Y.Z").
+	FirebaseIIDVersion string
+
 	// Hardware is the hardware name (Build.HARDWARE), usually same as Device
 	Hardware string
 
@@ -82,5 +86,9 @@ func DefaultAndroidDevice() AndroidDeviceInfo {
 
 		// Chrome 120.0.6099.144 (stable version from ~December 2023)
 		ChromeVersion: "120.0.6099.144",
+
+		// Firebase IID 21.1.0 shipped with Firebase BoM 32.x (mid-2023)
+		// This is the X-cliv header value sent by Android Firebase SDK.
+		FirebaseIIDVersion: "21.1.0",
 	}
 }
