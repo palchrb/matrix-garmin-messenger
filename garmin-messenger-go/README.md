@@ -2,25 +2,22 @@
 
 Go library for the Garmin Messenger (Hermes) protocol. Send and receive messages to Garmin InReach satellite devices programmatically.
 
-For protocol documentation and API reference, see the [root README](../../README.md) and [docs/api-reference.md](../../docs/api-reference.md). For the CLI tool, see [apps/go-cli/](../../apps/go-cli/).
+This library lives inside the [matrix-garmin-messenger](https://github.com/palchrb/matrix-garmin-messenger) monorepo and will be extracted to its own repo (`github.com/palchrb/garmin-messenger-go`) once stabilised.
 
 [![Go 1.24+](https://img.shields.io/badge/go-1.24+-00ADD8.svg)](https://go.dev/dl/)
 
 ## Quick Start
 
 ```bash
-# Clone the repository
-git clone https://github.com/yourusername/matrix-garmin-messenger/internal/hermes.git
-cd garmin-messenger/lib/go
-
-# Run tests
-go test ./... -v
+git clone https://github.com/palchrb/matrix-garmin-messenger.git
+cd matrix-garmin-messenger/garmin-messenger-go
+go test ./...
 ```
 
 ## Installation
 
 ```go
-import gm "github.com/yourusername/matrix-garmin-messenger/internal/hermes"
+import gm "github.com/palchrb/garmin-messenger-go"
 ```
 
 ### Dependencies
@@ -42,7 +39,7 @@ import (
     "context"
     "fmt"
 
-    gm "github.com/yourusername/matrix-garmin-messenger/internal/hermes"
+    gm "github.com/palchrb/garmin-messenger-go"
 )
 
 func main() {
@@ -328,8 +325,8 @@ All API responses are parsed into typed Go structs. See [`models.go`](models.go)
 ## Project Structure
 
 ```
-lib/go/
-├── go.mod              # Module: github.com/yourusername/matrix-garmin-messenger/internal/hermes
+garmin-messenger-go/
+├── go.mod              # Module: github.com/palchrb/garmin-messenger-go
 ├── doc.go              # Package documentation
 ├── models.go           # All structs, enums, and JSON deserialization
 ├── auth.go             # SMS OTP authentication and token management
@@ -349,8 +346,8 @@ lib/go/
 ## Testing
 
 ```bash
-cd lib/go
-go test ./... -v
+cd garmin-messenger-go
+go test ./...
 ```
 
 141 tests across 9 test files covering models, API, SignalR, FCM/GCM/MCS, authentication, and OTA UUID generation.
@@ -358,4 +355,4 @@ go test ./... -v
 ## Requirements
 
 - Go 1.24+
-- A Garmin Messenger account (see [root README](../../README.md#requirements))
+- A Garmin Messenger account with an active InReach device

@@ -9,7 +9,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/palchrb/garmin-email-forwarder/internal/hermes/internal/mcspb"
+	"github.com/palchrb/garmin-messenger-go/internal/mcspb"
 	"google.golang.org/protobuf/proto"
 )
 

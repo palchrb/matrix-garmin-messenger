@@ -11,7 +11,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	gm "github.com/palchrb/garmin-email-forwarder/internal/hermes"
+	gm "github.com/palchrb/garmin-messenger-go"
 )
 
 var emailRegexp = regexp.MustCompile(`[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}`)

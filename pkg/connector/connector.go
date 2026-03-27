@@ -1,5 +1,5 @@
 // Package connector implements the mautrix bridgev2 network connector for
-// Garmin Messenger, using the vendored Hermes API client (internal/hermes).
+// Garmin Messenger, using the Hermes API client (github.com/palchrb/garmin-messenger-go).
 package connector
 
 import (
@@ -9,7 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	gm "github.com/yourusername/matrix-garmin-messenger/internal/hermes"
+	gm "github.com/palchrb/garmin-messenger-go"
 	"go.mau.fi/util/configupgrade"
 	"maunium.net/go/mautrix/bridgev2"
 	"maunium.net/go/mautrix/bridgev2/database"
@@ -71,7 +71,7 @@ func (gc *GarminConnector) GetName() bridgev2.BridgeName {
 		NetworkURL:       "https://explore.garmin.com/en-US/inreach/",
 		NetworkIcon:      "mxc://maunium.net/REPLACE_WITH_GARMIN_ICON_MXC_URI",
 		NetworkID:        "garmin-messenger",
-		BeeperBridgeType: "github.com/yourusername/matrix-garmin-messenger",
+		BeeperBridgeType: "github.com/palchrb/matrix-garmin-messenger",
 		DefaultPort:      29340,
 	}
 }

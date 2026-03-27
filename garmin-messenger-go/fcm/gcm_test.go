@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/palchrb/garmin-email-forwarder/internal/hermes/internal/checkinpb"
+	"github.com/palchrb/garmin-messenger-go/internal/checkinpb"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/protobuf/proto"

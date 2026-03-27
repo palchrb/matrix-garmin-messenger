@@ -17,7 +17,7 @@ import (
 // ---------------------------------------------------------------------------
 
 func fixtureDir() string {
-	return filepath.Join("..", "..", "tests", "fixtures")
+	return filepath.Join("testdata", "fixtures")
 }
 
 func loadFixture(t *testing.T, name string) []byte {

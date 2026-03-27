@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/yourusername/matrix-garmin-messenger/internal/hermes/internal/mcspb"
+	"github.com/palchrb/garmin-messenger-go/internal/mcspb"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/protobuf/proto"

@@ -1,7 +1,7 @@
 package main
 
 import (
-	"github.com/yourusername/matrix-garmin-messenger/pkg/connector"
+	"github.com/palchrb/matrix-garmin-messenger/pkg/connector"
 	"maunium.net/go/mautrix/bridgev2/matrix/mxmain"
 )
 
@@ -16,7 +16,7 @@ func main() {
 	m := mxmain.BridgeMain{
 		Name:        "matrix-garmin-messenger",
 		Description: "A Matrix bridge for Garmin Messenger / InReach satellite devices",
-		URL:         "https://github.com/yourusername/matrix-garmin-messenger",
+		URL:         "https://github.com/palchrb/matrix-garmin-messenger",
 		Version:     "0.1.0",
 		Connector:   &connector.GarminConnector{},
 	}

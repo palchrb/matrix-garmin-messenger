@@ -1,6 +1,6 @@
 services:
   matrix-garmin-messenger:
-    image: ghcr.io/yourusername/matrix-garmin-messenger:latest
+    image: ghcr.io/palchrb/matrix-garmin-messenger:latest
     # Or build locally:
     # build: .
     container_name: matrix-garmin-messenger

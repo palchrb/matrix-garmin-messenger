@@ -17,8 +17,8 @@ import (
 	"sync"
 	"time"
 
-	gm "github.com/yourusername/matrix-garmin-messenger/internal/hermes"
-	"github.com/yourusername/matrix-garmin-messenger/internal/hermes/internal/mcspb"
+	gm "github.com/palchrb/garmin-messenger-go"
+	"github.com/palchrb/garmin-messenger-go/internal/mcspb"
 )
 
 // Event is a marker interface for FCM push notification events.

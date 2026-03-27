@@ -1,4 +1,4 @@
-module github.com/yourusername/matrix-garmin-messenger
+module github.com/palchrb/matrix-garmin-messenger
 
 go 1.24.0
 
@@ -6,13 +6,14 @@ toolchain go1.24.7
 
 require (
 	github.com/google/uuid v1.6.0
-	github.com/philippseith/signalr v0.8.0
+	github.com/palchrb/garmin-messenger-go v0.0.0
 	github.com/rs/zerolog v1.34.0
 	github.com/stretchr/testify v1.11.1
 	go.mau.fi/util v0.9.5
-	google.golang.org/protobuf v1.36.11
 	maunium.net/go/mautrix v0.26.2
 )
+
+replace github.com/palchrb/garmin-messenger-go => ./garmin-messenger-go
 
 require (
 	filippo.io/edwards25519 v1.1.0 // indirect
@@ -27,6 +28,7 @@ require (
 	github.com/mattn/go-isatty v0.0.20 // indirect
 	github.com/mattn/go-sqlite3 v1.14.33 // indirect
 	github.com/petermattis/goid v0.0.0-20260113132338-7c7de50cc741 // indirect
+	github.com/philippseith/signalr v0.8.0 // indirect
 	github.com/pmezard/go-difflib v1.0.0 // indirect
 	github.com/quic-go/qpack v0.5.1 // indirect
 	github.com/quic-go/quic-go v0.53.0 // indirect

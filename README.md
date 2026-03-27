@@ -26,7 +26,7 @@ Send and receive messages between Matrix and any Garmin InReach device (Mini 2, 
 ## Building
 
 ```bash
-git clone https://github.com/yourusername/matrix-garmin-messenger
+git clone https://github.com/palchrb/matrix-garmin-messenger
 cd matrix-garmin-messenger
 
 # Fetch the garmin-messenger library
@@ -96,7 +96,7 @@ The bot asks for your phone number, sends you an SMS code, and you're connected.
 ## Docker
 
 ```bash
-docker run -v /path/to/data:/data ghcr.io/yourusername/matrix-garmin-messenger:latest
+docker run -v /path/to/data:/data ghcr.io/palchrb/matrix-garmin-messenger:latest
 ```
 
 First run generates `config.yaml`. Edit it, run again for `registration.yaml`, register with your homeserver, then run normally.
@@ -105,7 +105,7 @@ First run generates `config.yaml`. Edit it, run again for `registration.yaml`, r
 # docker-compose.yaml
 services:
   matrix-garmin-messenger:
-    image: ghcr.io/yourusername/matrix-garmin-messenger:latest
+    image: ghcr.io/palchrb/matrix-garmin-messenger:latest
     volumes:
       - ./data:/data
     restart: unless-stopped

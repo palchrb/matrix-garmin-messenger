@@ -9,7 +9,7 @@ import (
 	"strconv"
 	"strings"
 
-	gm "github.com/yourusername/matrix-garmin-messenger/internal/hermes"
+	gm "github.com/palchrb/garmin-messenger-go"
 )
 
 // ToGarminAVIF converts an image to AVIF for sending via Garmin Messenger.

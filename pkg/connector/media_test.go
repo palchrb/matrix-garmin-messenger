@@ -4,7 +4,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
-	gm "github.com/yourusername/matrix-garmin-messenger/internal/hermes"
+	gm "github.com/palchrb/garmin-messenger-go"
 )
 
 func TestGarminMediaType(t *testing.T) {

@@ -12,7 +12,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/yourusername/matrix-garmin-messenger/internal/hermes/internal/checkinpb"
+	"github.com/palchrb/garmin-messenger-go/internal/checkinpb"
 	"google.golang.org/protobuf/proto"
 )
 
