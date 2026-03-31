@@ -1,4 +1,4 @@
-# JUST A WIP REPOSITORY FOR NOW, not tried it out yet! matrix-garmin-messenger
+# matrix-garmin-messenger
 
 A [Matrix](https://matrix.org) bridge for **Garmin Messenger** and **InReach satellite devices**, built on [mautrix-go bridgev2](https://mau.fi/blog/megabridge-twilio/).
 
