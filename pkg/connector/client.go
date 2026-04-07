@@ -56,7 +56,18 @@ type GarminClient struct {
 	syncTimeMu      sync.Mutex
 	pendingSaveTime *time.Time
 	saveTimer       *time.Timer
+
+	// recentMu guards the per-conversation recent-messages ring buffer used
+	// to resolve incoming reactions to their target without an API call.
+	// Populated by handleIncomingMessage on every non-reaction it processes
+	// and by syncMissedMessages in bulk after each conversation detail fetch.
+	recentMu       sync.Mutex
+	recentByConv   map[uuid.UUID][]gm.ConversationMessageModel
 }
+
+// recentMessagesPerConv caps how many messages per conversation are kept in
+// the in-memory cache for reaction parent resolution.
+const recentMessagesPerConv = 200
 
 // maxCatchupWindow caps how far back catch-up will scan if LastSyncTime is
 // missing or very stale. Without this, a long downtime could trigger an
@@ -104,10 +115,13 @@ func (c *GarminClient) Connect(ctx context.Context) {
 		StateEvent: status.StateConnected,
 	})
 
-	// Run an initial catch-up sync for any messages or status updates that
-	// arrived while the bridge was offline. The bridgev2 framework deduplicates
-	// by (PortalKey, MessageID), so already-bridged events are silently ignored.
-	if err := c.syncMissedMessages(ctx); err != nil {
+	// Run an initial catch-up sync for any messages that arrived while the
+	// bridge was offline. The bridgev2 framework deduplicates by
+	// (PortalKey, MessageID), so already-bridged events are silently ignored.
+	// Status receipts are skipped on initial sync because the Matrix events
+	// they reference may predate the bot's current room access (causing
+	// M_FORBIDDEN noise) and because their state is no longer actionable.
+	if err := c.syncMissedMessages(ctx, true); err != nil {
 		c.log.Warn().Err(err).Msg("Initial catch-up sync failed")
 	}
 	c.initialSyncDone = true
@@ -131,7 +145,7 @@ func (c *GarminClient) Connect(ctx context.Context) {
 		// callback returns promptly.
 		if c.initialSyncDone {
 			go func() {
-				if err := c.syncMissedMessages(context.Background()); err != nil {
+				if err := c.syncMissedMessages(context.Background(), false); err != nil {
 					c.log.Warn().Err(err).Msg("Reconnect catch-up sync failed")
 				}
 			}()
@@ -232,14 +246,19 @@ func (c *GarminClient) sendErrorState(err error, transientMsg string) {
 	})
 }
 
-// syncMissedMessages performs a catch-up backfill of messages and status
-// updates that arrived since c.userLogin.Metadata.LastSyncTime. It is safe to
-// call multiple times — the bridgev2 framework deduplicates events by
+// syncMissedMessages performs a catch-up backfill of messages and (optionally)
+// status updates that arrived since c.userLogin.Metadata.LastSyncTime. It is
+// safe to call multiple times — the bridgev2 framework deduplicates events by
 // (PortalKey, MessageID).
+//
+// When isInitial is true (catch-up after a bridge restart), status receipts
+// are skipped: the Matrix events they reference may predate the bot's current
+// room access, causing M_FORBIDDEN errors when bridgev2 tries to mark them as
+// read, and the receipts are no longer actionable in any case.
 //
 // The catch-up window is capped at maxCatchupWindow to prevent an arbitrarily
 // large backfill if LastSyncTime is missing or very stale.
-func (c *GarminClient) syncMissedMessages(ctx context.Context) error {
+func (c *GarminClient) syncMissedMessages(ctx context.Context, isInitial bool) error {
 	if !c.catchingUp.CompareAndSwap(false, true) {
 		c.log.Debug().Msg("Catch-up already in progress, skipping")
 		return nil
@@ -286,6 +305,10 @@ func (c *GarminClient) syncMissedMessages(ctx context.Context) error {
 				Msg("Failed to fetch conversation detail during catch-up")
 			continue
 		}
+		// Pre-populate the recent-messages cache with the FULL detail (not
+		// just messages newer than `since`), so reactions whose parent is
+		// older than the catch-up window can still be resolved.
+		c.bulkCacheRecentMessages(conv.ConversationID, detail.Messages)
 		for _, m := range detail.Messages {
 			if m.SentAt != nil && m.SentAt.Before(since) {
 				continue
@@ -301,27 +324,30 @@ func (c *GarminClient) syncMissedMessages(ctx context.Context) error {
 		}
 	}
 
-	// 2. Catch up on read/delivered receipts.
-	statuses, err := c.api.GetUpdatedStatuses(ctx, since, gm.WithStatusLimit(500))
-	if err != nil {
-		c.log.Warn().Err(err).Msg("Failed to fetch updated statuses during catch-up")
-	} else {
-		for _, sm := range statuses.StatusReceiptsForMessages {
-			for _, r := range sm.StatusReceipts {
-				upd := gm.MessageStatusUpdate{
-					MessageID: gm.SimpleCompoundMessageId{
-						MessageID:      sm.MessageID,
-						ConversationID: sm.ConversationID,
-					},
-					MessageStatus: &r.MessageStatus,
-					UpdatedAt:     r.UpdatedAt,
-				}
-				if r.UserID != "" {
-					if uid, err := uuid.Parse(r.UserID); err == nil {
-						upd.UserID = &uid
+	// 2. Catch up on read/delivered receipts. Skipped on initial (post-restart)
+	// sync — see function doc.
+	if !isInitial {
+		statuses, err := c.api.GetUpdatedStatuses(ctx, since, gm.WithStatusLimit(500))
+		if err != nil {
+			c.log.Warn().Err(err).Msg("Failed to fetch updated statuses during catch-up")
+		} else {
+			for _, sm := range statuses.StatusReceiptsForMessages {
+				for _, r := range sm.StatusReceipts {
+					upd := gm.MessageStatusUpdate{
+						MessageID: gm.SimpleCompoundMessageId{
+							MessageID:      sm.MessageID,
+							ConversationID: sm.ConversationID,
+						},
+						MessageStatus: &r.MessageStatus,
+						UpdatedAt:     r.UpdatedAt,
 					}
+					if r.UserID != "" {
+						if uid, err := uuid.Parse(r.UserID); err == nil {
+							upd.UserID = &uid
+						}
+					}
+					c.handleStatusUpdate(upd)
 				}
-				c.handleStatusUpdate(upd)
 			}
 		}
 	}
@@ -370,6 +396,69 @@ func conversationMsgToModel(convID uuid.UUID, m gm.ConversationMessageModel) gm.
 		FromUnitID:       m.FromUnitID,
 		IntendedUnitID:   m.IntendedUnitID,
 	}
+}
+
+// cacheRecentMessage adds a single message to the per-conversation
+// recent-messages ring buffer. Reaction messages are skipped — the cache is
+// only used to find reaction targets, and a reaction is never a target.
+// Duplicates by MessageID are silently ignored.
+func (c *GarminClient) cacheRecentMessage(convID uuid.UUID, m gm.ConversationMessageModel) {
+	if isReactionBody(derefStr(m.MessageBody)) {
+		return
+	}
+	c.recentMu.Lock()
+	defer c.recentMu.Unlock()
+	if c.recentByConv == nil {
+		c.recentByConv = make(map[uuid.UUID][]gm.ConversationMessageModel)
+	}
+	list := c.recentByConv[convID]
+	for i := range list {
+		if list[i].MessageID == m.MessageID {
+			return
+		}
+	}
+	list = append(list, m)
+	if len(list) > recentMessagesPerConv {
+		list = list[len(list)-recentMessagesPerConv:]
+	}
+	c.recentByConv[convID] = list
+}
+
+// bulkCacheRecentMessages merges a slice of messages (e.g. the result of
+// GetConversationDetail) into the per-conversation cache. Used by catch-up
+// sync to populate the cache before processing the conversation, so that
+// any reactions in the same batch can be resolved against their preceding
+// messages without an extra API call.
+func (c *GarminClient) bulkCacheRecentMessages(convID uuid.UUID, messages []gm.ConversationMessageModel) {
+	for _, m := range messages {
+		c.cacheRecentMessage(convID, m)
+	}
+}
+
+// snapshotRecentMessages returns a copy of the per-conversation cache. The
+// copy is required because matchReactionTarget reads it without holding
+// the cache lock.
+func (c *GarminClient) snapshotRecentMessages(convID uuid.UUID) []gm.ConversationMessageModel {
+	c.recentMu.Lock()
+	defer c.recentMu.Unlock()
+	list := c.recentByConv[convID]
+	if len(list) == 0 {
+		return nil
+	}
+	out := make([]gm.ConversationMessageModel, len(list))
+	copy(out, list)
+	return out
+}
+
+// resolveReactionParent is the unified entry point for reaction-target
+// resolution. It tries the in-memory cache first; if the cache is empty for
+// the conversation (which only happens before catch-up has populated it),
+// it falls back to a single REST GetConversationDetail call.
+func (c *GarminClient) resolveReactionParent(ctx context.Context, msg gm.MessageModel) (networkid.MessageID, error) {
+	if cached := c.snapshotRecentMessages(msg.ConversationID); len(cached) > 0 {
+		return resolveReactionParentFromMessages(msg, cached)
+	}
+	return c.resolveReactionParentID(ctx, msg)
 }
 
 // noteMessageReceived is called from handleIncomingMessage to advance the
@@ -812,11 +901,24 @@ func (c *GarminClient) handleIncomingMessage(msg gm.MessageModel) {
 	}
 
 	// Garmin encodes reactions as \u200b{emoji}\u200b to \u200a{quoted}\u200a.
-	// parentMessageId is never set in the SignalR push; fetch it from REST.
+	// parentMessageId is never populated by the Garmin server, so we resolve
+	// the target via text-matching against the per-conversation in-memory
+	// recent-messages cache (populated by every prior message and by
+	// catch-up sync).
 	if isReactionBody(derefStr(msg.MessageBody)) {
 		go c.handleIncomingReaction(msg, portalID, senderUUID)
 		return
 	}
+
+	// Cache the message body so future reactions in this conversation can be
+	// resolved by text-match without an API call.
+	c.cacheRecentMessage(msg.ConversationID, gm.ConversationMessageModel{
+		MessageID:   msg.MessageID,
+		MessageBody: msg.MessageBody,
+		From:        msg.From,
+		SentAt:      msg.SentAt,
+		ReceivedAt:  msg.ReceivedAt,
+	})
 
 	c.userLogin.Bridge.QueueRemoteEvent(c.userLogin, &simplevent.Message[gm.MessageModel]{
 		EventMeta: simplevent.EventMeta{
@@ -853,14 +955,26 @@ func (c *GarminClient) handleIncomingMessage(msg gm.MessageModel) {
 	c.sr.MarkAsDelivered(msg.ConversationID, msg.MessageID)
 }
 
-// handleIncomingReaction resolves the parentMessageId via REST and queues a
-// RemoteEventReaction. Called in a goroutine from handleIncomingMessage.
+// handleIncomingReaction resolves the reaction's target via text-matching
+// against the in-memory recent-messages cache (populated by every prior
+// message in the conversation, including the catch-up backfill). If the
+// cache is empty for this conversation — which only happens for the very
+// first message after a fresh start before catch-up has run — it falls back
+// to a single GetConversationDetail call.
+//
+// Called in a goroutine from handleIncomingMessage.
 func (c *GarminClient) handleIncomingReaction(msg gm.MessageModel, portalID networkid.PortalID, senderUUID string) {
-	ctx := context.Background()
 	emoji := extractReactionEmoji(derefStr(msg.MessageBody))
-	parentID, err := c.resolveReactionParentID(ctx, msg)
+	parentID, err := c.resolveReactionParent(context.Background(), msg)
 	if err != nil {
-		c.log.Warn().Err(err).
+		// During catch-up, dropping an unresolvable old reaction is expected
+		// (the server may have aged out its parent). Log at debug there to
+		// avoid noise.
+		ev := c.log.Warn()
+		if c.catchingUp.Load() {
+			ev = c.log.Debug()
+		}
+		ev.Err(err).
 			Str("msg_id", msg.MessageID.String()).
 			Msg("Could not resolve reaction parent — dropping")
 		return
