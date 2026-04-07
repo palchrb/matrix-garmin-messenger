@@ -416,36 +416,16 @@ func matchReactionTarget(messages []gm.ConversationMessageModel, reactionMsg gm.
 	return best
 }
 
-// resolveReactionParentID determines which message a reaction targets.
+// resolveReactionParentFromMessages determines which message a reaction
+// targets, given a pre-fetched slice of recent messages from the same
+// conversation. No API calls are made.
 //
-// Garmin SignalR pushes do not include parentMessageId, and in practice the
-// REST conversation detail endpoint does not populate it for reactions
-// either. The reliable approach (matching what gm-webclient does in its UI)
-// is to fetch recent messages and text-match the reaction's quoted body
-// against them, picking the closest in time.
-//
-// Resolution order:
-//  1. msg.ParentMessageID if the SignalR push happened to include it (rare)
-//  2. parentMessageId from the REST detail entry for this reaction (rare)
-//  3. Text-match the quoted body against the recent message history
-func (c *GarminClient) resolveReactionParentID(ctx context.Context, msg gm.MessageModel) (networkid.MessageID, error) {
-	if msg.ParentMessageID != nil {
-		return networkid.MessageID(msg.ParentMessageID.String()), nil
-	}
-
-	detail, err := c.api.GetConversationDetail(ctx, msg.ConversationID, gm.WithDetailLimit(100))
-	if err != nil {
-		return "", fmt.Errorf("reaction parent lookup failed: %w", err)
-	}
-
-	// Check if the REST entry happens to carry parentMessageId.
-	for _, m := range detail.Messages {
-		if m.MessageID == msg.MessageID && m.ParentMessageID != nil {
-			return networkid.MessageID(m.ParentMessageID.String()), nil
-		}
-	}
-
-	// Fall back to body-text matching.
+// Garmin never populates parentMessageId on reaction messages — neither in
+// SignalR pushes nor in REST conversation detail responses — so the only
+// reliable resolution path is text-matching the quoted body against the
+// recent history. This mirrors what the gm-webclient frontend does in its
+// rendering layer.
+func resolveReactionParentFromMessages(msg gm.MessageModel, messages []gm.ConversationMessageModel) (networkid.MessageID, error) {
 	_, targetText, ok := extractReactionTarget(derefStr(msg.MessageBody))
 	if !ok {
 		return "", fmt.Errorf("reaction %s has malformed body", msg.MessageID)
@@ -453,16 +433,33 @@ func (c *GarminClient) resolveReactionParentID(ctx context.Context, msg gm.Messa
 	if targetText == "" {
 		return "", fmt.Errorf("reaction %s has empty target text", msg.MessageID)
 	}
-	target := matchReactionTarget(detail.Messages, msg, targetText)
+	target := matchReactionTarget(messages, msg, targetText)
 	if target == nil {
 		return "", fmt.Errorf("no message matched reaction %s target text %q", msg.MessageID, targetText)
 	}
+	return networkid.MessageID(target.MessageID.String()), nil
+}
+
+// resolveReactionParentID is the live (SignalR-push) variant of reaction
+// resolution: it issues exactly one GetConversationDetail call to fetch
+// recent messages, then runs the text-matching algorithm against them.
+//
+// During catch-up sync the caller already has the detail in hand and should
+// call resolveReactionParentFromMessages directly to avoid the API call.
+func (c *GarminClient) resolveReactionParentID(ctx context.Context, msg gm.MessageModel) (networkid.MessageID, error) {
+	detail, err := c.api.GetConversationDetail(ctx, msg.ConversationID, gm.WithDetailLimit(100))
+	if err != nil {
+		return "", fmt.Errorf("reaction parent lookup failed: %w", err)
+	}
+	parentID, err := resolveReactionParentFromMessages(msg, detail.Messages)
+	if err != nil {
+		return "", err
+	}
 	c.log.Debug().
 		Str("reaction_id", msg.MessageID.String()).
-		Str("matched_parent_id", target.MessageID.String()).
-		Str("target_text", targetText).
+		Str("matched_parent_id", string(parentID)).
 		Msg("Resolved reaction parent via text matching")
-	return networkid.MessageID(target.MessageID.String()), nil
+	return parentID, nil
 }
 
 // resolveReactionOriginalBody fetches the message body of the target message for

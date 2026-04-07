@@ -170,3 +170,67 @@ func TestMatchReactionTarget(t *testing.T) {
 		assert.Nil(t, got)
 	})
 }
+
+func TestRecentMessagesCache(t *testing.T) {
+	c := &GarminClient{}
+	convID := uuid.New()
+
+	mk := func(body string) gm.ConversationMessageModel {
+		b := body
+		return gm.ConversationMessageModel{
+			MessageID:   uuid.New(),
+			MessageBody: &b,
+		}
+	}
+
+	t.Run("cacheRecentMessage stores and snapshot returns copy", func(t *testing.T) {
+		c.recentByConv = nil // reset
+		m := mk("hello")
+		c.cacheRecentMessage(convID, m)
+		snap := c.snapshotRecentMessages(convID)
+		assert.Len(t, snap, 1)
+		assert.Equal(t, m.MessageID, snap[0].MessageID)
+		// Mutating the snapshot must not affect the cache.
+		snap[0] = gm.ConversationMessageModel{}
+		snap2 := c.snapshotRecentMessages(convID)
+		assert.Equal(t, m.MessageID, snap2[0].MessageID)
+	})
+
+	t.Run("skips reaction bodies", func(t *testing.T) {
+		c.recentByConv = nil
+		c.cacheRecentMessage(convID, mk("\u200b👍\u200b to \u200aHello\u200a"))
+		assert.Len(t, c.snapshotRecentMessages(convID), 0)
+	})
+
+	t.Run("dedupes by message ID", func(t *testing.T) {
+		c.recentByConv = nil
+		m := mk("hi")
+		c.cacheRecentMessage(convID, m)
+		c.cacheRecentMessage(convID, m)
+		assert.Len(t, c.snapshotRecentMessages(convID), 1)
+	})
+
+	t.Run("ring buffer evicts oldest", func(t *testing.T) {
+		c.recentByConv = nil
+		for i := 0; i < recentMessagesPerConv+5; i++ {
+			c.cacheRecentMessage(convID, mk("msg"))
+		}
+		snap := c.snapshotRecentMessages(convID)
+		assert.Len(t, snap, recentMessagesPerConv)
+	})
+
+	t.Run("bulkCacheRecentMessages merges", func(t *testing.T) {
+		c.recentByConv = nil
+		batch := []gm.ConversationMessageModel{mk("a"), mk("b"), mk("c")}
+		c.bulkCacheRecentMessages(convID, batch)
+		assert.Len(t, c.snapshotRecentMessages(convID), 3)
+		// Re-bulking the same batch is idempotent.
+		c.bulkCacheRecentMessages(convID, batch)
+		assert.Len(t, c.snapshotRecentMessages(convID), 3)
+	})
+
+	t.Run("snapshot of unknown conv returns nil", func(t *testing.T) {
+		c.recentByConv = nil
+		assert.Nil(t, c.snapshotRecentMessages(uuid.New()))
+	})
+}
