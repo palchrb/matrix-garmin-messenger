@@ -104,10 +104,13 @@ func (c *GarminClient) Connect(ctx context.Context) {
 		StateEvent: status.StateConnected,
 	})
 
-	// Run an initial catch-up sync for any messages or status updates that
-	// arrived while the bridge was offline. The bridgev2 framework deduplicates
-	// by (PortalKey, MessageID), so already-bridged events are silently ignored.
-	if err := c.syncMissedMessages(ctx); err != nil {
+	// Run an initial catch-up sync for any messages that arrived while the
+	// bridge was offline. The bridgev2 framework deduplicates by
+	// (PortalKey, MessageID), so already-bridged events are silently ignored.
+	// Status receipts are skipped on initial sync because the Matrix events
+	// they reference may predate the bot's current room access (causing
+	// M_FORBIDDEN noise) and because their state is no longer actionable.
+	if err := c.syncMissedMessages(ctx, true); err != nil {
 		c.log.Warn().Err(err).Msg("Initial catch-up sync failed")
 	}
 	c.initialSyncDone = true
@@ -131,7 +134,7 @@ func (c *GarminClient) Connect(ctx context.Context) {
 		// callback returns promptly.
 		if c.initialSyncDone {
 			go func() {
-				if err := c.syncMissedMessages(context.Background()); err != nil {
+				if err := c.syncMissedMessages(context.Background(), false); err != nil {
 					c.log.Warn().Err(err).Msg("Reconnect catch-up sync failed")
 				}
 			}()
@@ -232,14 +235,19 @@ func (c *GarminClient) sendErrorState(err error, transientMsg string) {
 	})
 }
 
-// syncMissedMessages performs a catch-up backfill of messages and status
-// updates that arrived since c.userLogin.Metadata.LastSyncTime. It is safe to
-// call multiple times — the bridgev2 framework deduplicates events by
+// syncMissedMessages performs a catch-up backfill of messages and (optionally)
+// status updates that arrived since c.userLogin.Metadata.LastSyncTime. It is
+// safe to call multiple times — the bridgev2 framework deduplicates events by
 // (PortalKey, MessageID).
+//
+// When isInitial is true (catch-up after a bridge restart), status receipts
+// are skipped: the Matrix events they reference may predate the bot's current
+// room access, causing M_FORBIDDEN errors when bridgev2 tries to mark them as
+// read, and the receipts are no longer actionable in any case.
 //
 // The catch-up window is capped at maxCatchupWindow to prevent an arbitrarily
 // large backfill if LastSyncTime is missing or very stale.
-func (c *GarminClient) syncMissedMessages(ctx context.Context) error {
+func (c *GarminClient) syncMissedMessages(ctx context.Context, isInitial bool) error {
 	if !c.catchingUp.CompareAndSwap(false, true) {
 		c.log.Debug().Msg("Catch-up already in progress, skipping")
 		return nil
@@ -301,27 +309,30 @@ func (c *GarminClient) syncMissedMessages(ctx context.Context) error {
 		}
 	}
 
-	// 2. Catch up on read/delivered receipts.
-	statuses, err := c.api.GetUpdatedStatuses(ctx, since, gm.WithStatusLimit(500))
-	if err != nil {
-		c.log.Warn().Err(err).Msg("Failed to fetch updated statuses during catch-up")
-	} else {
-		for _, sm := range statuses.StatusReceiptsForMessages {
-			for _, r := range sm.StatusReceipts {
-				upd := gm.MessageStatusUpdate{
-					MessageID: gm.SimpleCompoundMessageId{
-						MessageID:      sm.MessageID,
-						ConversationID: sm.ConversationID,
-					},
-					MessageStatus: &r.MessageStatus,
-					UpdatedAt:     r.UpdatedAt,
-				}
-				if r.UserID != "" {
-					if uid, err := uuid.Parse(r.UserID); err == nil {
-						upd.UserID = &uid
+	// 2. Catch up on read/delivered receipts. Skipped on initial (post-restart)
+	// sync — see function doc.
+	if !isInitial {
+		statuses, err := c.api.GetUpdatedStatuses(ctx, since, gm.WithStatusLimit(500))
+		if err != nil {
+			c.log.Warn().Err(err).Msg("Failed to fetch updated statuses during catch-up")
+		} else {
+			for _, sm := range statuses.StatusReceiptsForMessages {
+				for _, r := range sm.StatusReceipts {
+					upd := gm.MessageStatusUpdate{
+						MessageID: gm.SimpleCompoundMessageId{
+							MessageID:      sm.MessageID,
+							ConversationID: sm.ConversationID,
+						},
+						MessageStatus: &r.MessageStatus,
+						UpdatedAt:     r.UpdatedAt,
 					}
+					if r.UserID != "" {
+						if uid, err := uuid.Parse(r.UserID); err == nil {
+							upd.UserID = &uid
+						}
+					}
+					c.handleStatusUpdate(upd)
 				}
-				c.handleStatusUpdate(upd)
 			}
 		}
 	}
@@ -860,7 +871,14 @@ func (c *GarminClient) handleIncomingReaction(msg gm.MessageModel, portalID netw
 	emoji := extractReactionEmoji(derefStr(msg.MessageBody))
 	parentID, err := c.resolveReactionParentID(ctx, msg)
 	if err != nil {
-		c.log.Warn().Err(err).
+		// During catch-up, the server may no longer return parentMessageId for
+		// older reactions whose parent has been deleted/aged out. That's
+		// expected and harmless — log at debug to avoid noise.
+		ev := c.log.Warn()
+		if c.catchingUp.Load() {
+			ev = c.log.Debug()
+		}
+		ev.Err(err).
 			Str("msg_id", msg.MessageID.String()).
 			Msg("Could not resolve reaction parent — dropping")
 		return
