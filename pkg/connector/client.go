@@ -2,12 +2,14 @@ package connector
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
@@ -39,7 +41,32 @@ type GarminClient struct {
 	// is stored here so that incoming SignalR events for that conversation are
 	// routed to the same portal instead of creating a duplicate.
 	pendingConvPortals sync.Map // map[string]networkid.PortalKey
+
+	// initialSyncDone is set after Connect() has performed the initial catch-up
+	// sync. It is used so the OnOpen callback only triggers a reconnect catch-up
+	// when the SignalR connection is re-established (not on the first connect,
+	// where Connect() already handled the initial sync).
+	initialSyncDone bool
+
+	// catchingUp prevents two catch-up syncs from running concurrently if
+	// OnOpen fires while a previous sync is still in progress.
+	catchingUp atomic.Bool
+
+	// syncTimeMu guards LastSyncTime updates and the debounced save state.
+	syncTimeMu      sync.Mutex
+	pendingSaveTime *time.Time
+	saveTimer       *time.Timer
 }
+
+// maxCatchupWindow caps how far back catch-up will scan if LastSyncTime is
+// missing or very stale. Without this, a long downtime could trigger an
+// arbitrarily large backfill.
+const maxCatchupWindow = 48 * time.Hour
+
+// debounceSaveInterval is how long to wait after the last LastSyncTime update
+// before persisting it to the bridgev2 database. This avoids one DB write per
+// incoming Garmin message.
+const debounceSaveInterval = 5 * time.Minute
 
 var _ bridgev2.NetworkAPI = (*GarminClient)(nil)
 var _ bridgev2.IdentifierResolvingNetworkAPI = (*GarminClient)(nil)
@@ -69,17 +96,21 @@ func newGarminClient(gc *GarminConnector, login *bridgev2.UserLogin, auth *gm.He
 func (c *GarminClient) Connect(ctx context.Context) {
 	// Validate session with a lightweight call.
 	if _, err := c.api.GetConversations(ctx, gm.WithLimit(1)); err != nil {
-		c.userLogin.BridgeState.Send(status.BridgeState{
-			StateEvent: status.StateBadCredentials,
-			Error:      "garmin-auth-error",
-			Message:    "Failed to connect to Garmin Messenger: " + err.Error(),
-		})
+		c.sendErrorState(err, "Failed to connect to Garmin Messenger: "+err.Error())
 		return
 	}
 
 	c.userLogin.BridgeState.Send(status.BridgeState{
 		StateEvent: status.StateConnected,
 	})
+
+	// Run an initial catch-up sync for any messages or status updates that
+	// arrived while the bridge was offline. The bridgev2 framework deduplicates
+	// by (PortalKey, MessageID), so already-bridged events are silently ignored.
+	if err := c.syncMissedMessages(ctx); err != nil {
+		c.log.Warn().Err(err).Msg("Initial catch-up sync failed")
+	}
+	c.initialSyncDone = true
 
 	// Register all SignalR callbacks before starting.
 	c.sr.OnMessage(func(msg gm.MessageModel) {
@@ -95,6 +126,16 @@ func (c *GarminClient) Connect(ctx context.Context) {
 		c.userLogin.BridgeState.Send(status.BridgeState{
 			StateEvent: status.StateConnected,
 		})
+		// On reconnect (not the first connect), backfill anything we missed
+		// while the WebSocket was down. Run in a goroutine so the SignalR
+		// callback returns promptly.
+		if c.initialSyncDone {
+			go func() {
+				if err := c.syncMissedMessages(context.Background()); err != nil {
+					c.log.Warn().Err(err).Msg("Reconnect catch-up sync failed")
+				}
+			}()
+		}
 	})
 
 	c.sr.OnClose(func() {
@@ -106,10 +147,22 @@ func (c *GarminClient) Connect(ctx context.Context) {
 		})
 	})
 
+	c.sr.OnError(func(err error) {
+		c.log.Err(err).Msg("SignalR reported error")
+		if isPermanentAuthError(err) {
+			c.userLogin.BridgeState.Send(status.BridgeState{
+				StateEvent: status.StateBadCredentials,
+				Error:      "garmin-session-expired",
+				Message:    "Garmin session expired or revoked. Please re-login.",
+			})
+		}
+	})
+
 	// Start() blocks until ctx is cancelled; the library handles reconnects.
 	go func() {
 		if err := c.sr.Start(ctx); err != nil && ctx.Err() == nil {
 			c.log.Err(err).Msg("SignalR Start returned error")
+			c.sendErrorState(err, "Lost connection to Garmin Messenger: "+err.Error())
 		}
 	}()
 
@@ -140,8 +193,233 @@ func (c *GarminClient) ensureSpaceAvatar(ctx context.Context) {
 
 // Disconnect stops the SignalR connection cleanly.
 func (c *GarminClient) Disconnect() {
+	// Flush any pending LastSyncTime save before tearing down so we don't lose
+	// the cursor for the next bridge start.
+	c.flushSyncTimeSave(context.Background())
 	c.sr.Stop()
 	c.api.Close()
+}
+
+// isPermanentAuthError returns true if err is an *gm.APIError with status 401
+// or 403, indicating the user must re-authenticate.
+func isPermanentAuthError(err error) bool {
+	if err == nil {
+		return false
+	}
+	var apiErr *gm.APIError
+	if errors.As(err, &apiErr) {
+		return apiErr.StatusCode == http.StatusUnauthorized || apiErr.StatusCode == http.StatusForbidden
+	}
+	return false
+}
+
+// sendErrorState classifies err and sends an appropriate BridgeState event.
+// Permanent auth failures get StateBadCredentials with a clear message; all
+// other errors get StateTransientDisconnect.
+func (c *GarminClient) sendErrorState(err error, transientMsg string) {
+	if isPermanentAuthError(err) {
+		c.userLogin.BridgeState.Send(status.BridgeState{
+			StateEvent: status.StateBadCredentials,
+			Error:      "garmin-session-expired",
+			Message:    "Garmin session expired or revoked. Please re-login.",
+		})
+		return
+	}
+	c.userLogin.BridgeState.Send(status.BridgeState{
+		StateEvent: status.StateTransientDisconnect,
+		Error:      "garmin-connect-error",
+		Message:    transientMsg,
+	})
+}
+
+// syncMissedMessages performs a catch-up backfill of messages and status
+// updates that arrived since c.userLogin.Metadata.LastSyncTime. It is safe to
+// call multiple times — the bridgev2 framework deduplicates events by
+// (PortalKey, MessageID).
+//
+// The catch-up window is capped at maxCatchupWindow to prevent an arbitrarily
+// large backfill if LastSyncTime is missing or very stale.
+func (c *GarminClient) syncMissedMessages(ctx context.Context) error {
+	if !c.catchingUp.CompareAndSwap(false, true) {
+		c.log.Debug().Msg("Catch-up already in progress, skipping")
+		return nil
+	}
+	defer c.catchingUp.Store(false)
+
+	meta, _ := c.userLogin.Metadata.(*UserLoginMetadata)
+	if meta == nil {
+		return fmt.Errorf("user login has no metadata")
+	}
+
+	now := time.Now()
+	earliest := now.Add(-maxCatchupWindow)
+	var since time.Time
+	if meta.LastSyncTime != nil && meta.LastSyncTime.After(earliest) {
+		since = *meta.LastSyncTime
+	} else {
+		since = earliest
+		if meta.LastSyncTime != nil {
+			c.log.Warn().
+				Time("last_sync_time", *meta.LastSyncTime).
+				Time("capped_to", since).
+				Msg("LastSyncTime is older than maxCatchupWindow; capping catch-up window")
+		}
+	}
+
+	c.log.Info().Time("since", since).Msg("Starting catch-up sync")
+
+	// 1. Find conversations updated since `since`.
+	convs, err := c.api.GetConversations(ctx, gm.WithAfterDate(since), gm.WithLimit(500))
+	if err != nil {
+		return fmt.Errorf("list updated conversations: %w", err)
+	}
+
+	msgCount := 0
+	for _, conv := range convs.Conversations {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		detail, err := c.api.GetConversationDetail(ctx, conv.ConversationID, gm.WithDetailLimit(200))
+		if err != nil {
+			c.log.Warn().Err(err).
+				Stringer("conversation_id", conv.ConversationID).
+				Msg("Failed to fetch conversation detail during catch-up")
+			continue
+		}
+		for _, m := range detail.Messages {
+			if m.SentAt != nil && m.SentAt.Before(since) {
+				continue
+			}
+			c.handleIncomingMessage(conversationMsgToModel(conv.ConversationID, m))
+			msgCount++
+		}
+		// Small delay to avoid hammering the API.
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(100 * time.Millisecond):
+		}
+	}
+
+	// 2. Catch up on read/delivered receipts.
+	statuses, err := c.api.GetUpdatedStatuses(ctx, since, gm.WithStatusLimit(500))
+	if err != nil {
+		c.log.Warn().Err(err).Msg("Failed to fetch updated statuses during catch-up")
+	} else {
+		for _, sm := range statuses.StatusReceiptsForMessages {
+			for _, r := range sm.StatusReceipts {
+				upd := gm.MessageStatusUpdate{
+					MessageID: gm.SimpleCompoundMessageId{
+						MessageID:      sm.MessageID,
+						ConversationID: sm.ConversationID,
+					},
+					MessageStatus: &r.MessageStatus,
+					UpdatedAt:     r.UpdatedAt,
+				}
+				if r.UserID != "" {
+					if uid, err := uuid.Parse(r.UserID); err == nil {
+						upd.UserID = &uid
+					}
+				}
+				c.handleStatusUpdate(upd)
+			}
+		}
+	}
+
+	// Mark this catch-up as complete by advancing LastSyncTime to the time we
+	// started the sync (using `now` rather than time.Now() so we don't skip
+	// over events that arrived during the sync itself).
+	meta.LastSyncTime = &now
+	if err := c.userLogin.Save(ctx); err != nil {
+		c.log.Warn().Err(err).Msg("Failed to persist LastSyncTime after catch-up")
+	}
+
+	c.log.Info().
+		Int("conversations", len(convs.Conversations)).
+		Int("messages", msgCount).
+		Msg("Catch-up sync complete")
+	return nil
+}
+
+// conversationMsgToModel converts a ConversationMessageModel (returned by the
+// REST conversation detail endpoint) into the MessageModel format used by the
+// SignalR handler. ConversationMessageModel lacks ConversationID (it's
+// implicit from the parent conversation) and a few other fields.
+func conversationMsgToModel(convID uuid.UUID, m gm.ConversationMessageModel) gm.MessageModel {
+	return gm.MessageModel{
+		MessageID:        m.MessageID,
+		ConversationID:   convID,
+		ParentMessageID:  m.ParentMessageID,
+		MessageBody:      m.MessageBody,
+		From:             m.From,
+		SentAt:           m.SentAt,
+		ReceivedAt:       m.ReceivedAt,
+		Status:           m.Status,
+		UserLocation:     m.UserLocation,
+		ReferencePoint:   m.ReferencePoint,
+		MessageType:      m.MessageType,
+		MapShareUrl:      m.MapShareUrl,
+		MapSharePassword: m.MapSharePassword,
+		LiveTrackUrl:     m.LiveTrackUrl,
+		FromDeviceType:   m.FromDeviceType,
+		MediaID:          m.MediaID,
+		MediaType:        m.MediaType,
+		UUID:             m.UUID,
+		Transcription:    m.Transcription,
+		OtaUuid:          m.OtaUuid,
+		FromUnitID:       m.FromUnitID,
+		IntendedUnitID:   m.IntendedUnitID,
+	}
+}
+
+// noteMessageReceived is called from handleIncomingMessage to advance the
+// LastSyncTime cursor as live messages arrive. The actual database write is
+// debounced via debounceSaveInterval to avoid one DB write per Garmin event.
+func (c *GarminClient) noteMessageReceived(ts time.Time) {
+	if ts.IsZero() {
+		ts = time.Now()
+	}
+	c.syncTimeMu.Lock()
+	defer c.syncTimeMu.Unlock()
+	if c.pendingSaveTime != nil && !ts.After(*c.pendingSaveTime) {
+		// We already have a pending save with a newer timestamp.
+	} else {
+		t := ts
+		c.pendingSaveTime = &t
+	}
+	if c.saveTimer == nil {
+		c.saveTimer = time.AfterFunc(debounceSaveInterval, func() {
+			c.flushSyncTimeSave(context.Background())
+		})
+	}
+}
+
+// flushSyncTimeSave persists any pending LastSyncTime update immediately.
+// Called both from the debounce timer and from Disconnect().
+func (c *GarminClient) flushSyncTimeSave(ctx context.Context) {
+	c.syncTimeMu.Lock()
+	pending := c.pendingSaveTime
+	c.pendingSaveTime = nil
+	if c.saveTimer != nil {
+		c.saveTimer.Stop()
+		c.saveTimer = nil
+	}
+	c.syncTimeMu.Unlock()
+
+	if pending == nil {
+		return
+	}
+	meta, ok := c.userLogin.Metadata.(*UserLoginMetadata)
+	if !ok || meta == nil {
+		return
+	}
+	if meta.LastSyncTime != nil && !pending.After(*meta.LastSyncTime) {
+		return
+	}
+	meta.LastSyncTime = pending
+	if err := c.userLogin.Save(ctx); err != nil {
+		c.log.Warn().Err(err).Msg("Failed to persist LastSyncTime")
+	}
 }
 
 // IsLoggedIn returns true if the auth session has credentials.
@@ -566,6 +844,10 @@ func (c *GarminClient) handleIncomingMessage(msg gm.MessageModel) {
 		ID:                 networkid.MessageID(msgIDStr),
 		ConvertMessageFunc: c.convertMessage,
 	})
+
+	// Advance the catch-up cursor so a future restart/reconnect knows it can
+	// skip everything up to this point. Saved via debounced background flush.
+	c.noteMessageReceived(derefTime(msg.SentAt))
 
 	// Mark as delivered via SignalR (real-time, preferred over REST).
 	c.sr.MarkAsDelivered(msg.ConversationID, msg.MessageID)

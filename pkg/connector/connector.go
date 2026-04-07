@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"strings"
+	"time"
 
 	gm "github.com/yourusername/matrix-garmin-messenger/internal/hermes"
 	"go.mau.fi/util/configupgrade"
@@ -144,8 +145,14 @@ func (gc *GarminConnector) CreateLogin(_ context.Context, user *bridgev2.User, f
 
 // UserLoginMetadata stores the phone number and a reference to the
 // session directory. The actual credentials are stored on disk by HermesAuth.
+//
+// LastSyncTime is the most recent time at which the bridge knows it had
+// successfully received Garmin events. It is used to drive catch-up sync
+// after a SignalR reconnect or a bridge restart, by passing it as the
+// AfterDate filter to GetConversations and GetUpdatedStatuses.
 type UserLoginMetadata struct {
-	PhoneNumber string `json:"phoneNumber"`
+	PhoneNumber  string     `json:"phoneNumber"`
+	LastSyncTime *time.Time `json:"lastSyncTime,omitempty"`
 }
 
 // PortalMetadata stores Garmin-specific data for a bridged conversation.
