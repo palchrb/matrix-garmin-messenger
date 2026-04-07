@@ -398,6 +398,38 @@ func conversationMsgToModel(convID uuid.UUID, m gm.ConversationMessageModel) gm.
 	}
 }
 
+// messageModelToConversation is the inverse of conversationMsgToModel: it
+// strips the SignalR-only fields (ConversationID, To, MediaMetadata) so a
+// MessageModel from a SignalR push can be stored in the per-conversation
+// recent-messages cache. Used by the live message handler so that media
+// messages keep their UUID/MediaID/MediaType fields, which are needed to
+// resolve reactions to caption-less media.
+func messageModelToConversation(m gm.MessageModel) gm.ConversationMessageModel {
+	return gm.ConversationMessageModel{
+		MessageID:        m.MessageID,
+		ParentMessageID:  m.ParentMessageID,
+		MessageBody:      m.MessageBody,
+		From:             m.From,
+		SentAt:           m.SentAt,
+		ReceivedAt:       m.ReceivedAt,
+		Status:           m.Status,
+		UserLocation:     m.UserLocation,
+		ReferencePoint:   m.ReferencePoint,
+		MessageType:      m.MessageType,
+		MapShareUrl:      m.MapShareUrl,
+		MapSharePassword: m.MapSharePassword,
+		LiveTrackUrl:     m.LiveTrackUrl,
+		FromDeviceType:   m.FromDeviceType,
+		MediaID:          m.MediaID,
+		MediaType:        m.MediaType,
+		UUID:             m.UUID,
+		Transcription:    m.Transcription,
+		OtaUuid:          m.OtaUuid,
+		FromUnitID:       m.FromUnitID,
+		IntendedUnitID:   m.IntendedUnitID,
+	}
+}
+
 // cacheRecentMessage adds a single message to the per-conversation
 // recent-messages ring buffer. Reaction messages are skipped — the cache is
 // only used to find reaction targets, and a reaction is never a target.
@@ -911,14 +943,9 @@ func (c *GarminClient) handleIncomingMessage(msg gm.MessageModel) {
 	}
 
 	// Cache the message body so future reactions in this conversation can be
-	// resolved by text-match without an API call.
-	c.cacheRecentMessage(msg.ConversationID, gm.ConversationMessageModel{
-		MessageID:   msg.MessageID,
-		MessageBody: msg.MessageBody,
-		From:        msg.From,
-		SentAt:      msg.SentAt,
-		ReceivedAt:  msg.ReceivedAt,
-	})
+	// resolved by text-match (or media-UUID match for caption-less media)
+	// without an API call.
+	c.cacheRecentMessage(msg.ConversationID, messageModelToConversation(msg))
 
 	c.userLogin.Bridge.QueueRemoteEvent(c.userLogin, &simplevent.Message[gm.MessageModel]{
 		EventMeta: simplevent.EventMeta{

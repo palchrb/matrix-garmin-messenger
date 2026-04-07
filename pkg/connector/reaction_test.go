@@ -7,6 +7,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	gm "github.com/yourusername/matrix-garmin-messenger/internal/hermes"
+	"maunium.net/go/mautrix/bridgev2/networkid"
 )
 
 func TestExtractReactionTarget(t *testing.T) {
@@ -169,6 +170,127 @@ func TestMatchReactionTarget(t *testing.T) {
 		got := matchReactionTarget(messages, reaction, "")
 		assert.Nil(t, got)
 	})
+}
+
+func TestExtractMediaRefUUID(t *testing.T) {
+	cases := []struct {
+		name   string
+		input  string
+		want   string
+		wantOK bool
+	}{
+		{
+			name:   "camera with thin space",
+			input:  "\u2009📷(816CA11B-FD69-49AD-A849-2AE7121E215F)",
+			want:   "816ca11b-fd69-49ad-a849-2ae7121e215f",
+			wantOK: true,
+		},
+		{
+			name:   "microphone no thin space",
+			input:  "🎤(11111111-2222-3333-4444-555555555555)",
+			want:   "11111111-2222-3333-4444-555555555555",
+			wantOK: true,
+		},
+		{
+			name:   "lowercase uuid",
+			input:  "📷(deadbeef-0000-0000-0000-000000000000)",
+			want:   "deadbeef-0000-0000-0000-000000000000",
+			wantOK: true,
+		},
+		{name: "plain text", input: "Hello world", wantOK: false},
+		{name: "parens but not uuid", input: "Foo(not-a-uuid)", wantOK: false},
+		{name: "uuid not in parens", input: "816CA11B-FD69-49AD-A849-2AE7121E215F", wantOK: false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			id, ok := extractMediaRefUUID(tc.input)
+			assert.Equal(t, tc.wantOK, ok)
+			if tc.wantOK {
+				assert.Equal(t, tc.want, id.String())
+			}
+		})
+	}
+}
+
+func TestMatchReactionMediaTarget(t *testing.T) {
+	mediaID := uuid.MustParse("816ca11b-fd69-49ad-a849-2ae7121e215f")
+	otherUUID := uuid.New()
+
+	mkMedia := func(mediaID, msgUUID *uuid.UUID, secondsAgo int) gm.ConversationMessageModel {
+		t := time.Now().Add(-time.Duration(secondsAgo) * time.Second)
+		return gm.ConversationMessageModel{
+			MessageID: uuid.New(),
+			MediaID:   mediaID,
+			UUID:      msgUUID,
+			SentAt:    &t,
+		}
+	}
+
+	t.Run("matches by MediaID", func(t *testing.T) {
+		messages := []gm.ConversationMessageModel{
+			mkMedia(&otherUUID, nil, 60),
+			mkMedia(&mediaID, nil, 30),
+		}
+		reactTime := time.Now()
+		reaction := gm.MessageModel{MessageID: uuid.New(), SentAt: &reactTime}
+		got := matchReactionMediaTarget(messages, reaction, mediaID)
+		assert.NotNil(t, got)
+		assert.Equal(t, messages[1].MessageID, got.MessageID)
+	})
+
+	t.Run("matches by UUID field", func(t *testing.T) {
+		messages := []gm.ConversationMessageModel{
+			mkMedia(nil, &mediaID, 30),
+		}
+		reactTime := time.Now()
+		reaction := gm.MessageModel{MessageID: uuid.New(), SentAt: &reactTime}
+		got := matchReactionMediaTarget(messages, reaction, mediaID)
+		assert.NotNil(t, got)
+	})
+
+	t.Run("picks closest in time", func(t *testing.T) {
+		messages := []gm.ConversationMessageModel{
+			mkMedia(&mediaID, nil, 600),
+			mkMedia(&mediaID, nil, 30), // closest — should win
+			mkMedia(&mediaID, nil, 1200),
+		}
+		reactTime := time.Now()
+		reaction := gm.MessageModel{MessageID: uuid.New(), SentAt: &reactTime}
+		got := matchReactionMediaTarget(messages, reaction, mediaID)
+		assert.NotNil(t, got)
+		assert.Equal(t, messages[1].MessageID, got.MessageID)
+	})
+
+	t.Run("no match returns nil", func(t *testing.T) {
+		messages := []gm.ConversationMessageModel{
+			mkMedia(&otherUUID, nil, 30),
+		}
+		reactTime := time.Now()
+		reaction := gm.MessageModel{MessageID: uuid.New(), SentAt: &reactTime}
+		got := matchReactionMediaTarget(messages, reaction, mediaID)
+		assert.Nil(t, got)
+	})
+}
+
+func TestResolveReactionParentFromMessages_MediaRef(t *testing.T) {
+	mediaID := uuid.MustParse("816ca11b-fd69-49ad-a849-2ae7121e215f")
+	now := time.Now()
+	messages := []gm.ConversationMessageModel{
+		{
+			MessageID: uuid.New(),
+			MediaID:   &mediaID,
+			SentAt:    &now,
+		},
+	}
+	reactBody := "\u200b❤️\u200b to \u200a\u2009📷(816CA11B-FD69-49AD-A849-2AE7121E215F)\u200a"
+	reaction := gm.MessageModel{
+		MessageID:   uuid.New(),
+		MessageBody: &reactBody,
+		SentAt:      &now,
+	}
+	parentID, err := resolveReactionParentFromMessages(reaction, messages)
+	assert.NoError(t, err)
+	assert.Equal(t, networkid.MessageID(messages[0].MessageID.String()), parentID)
 }
 
 func TestRecentMessagesCache(t *testing.T) {

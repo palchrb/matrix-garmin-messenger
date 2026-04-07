@@ -363,6 +363,74 @@ var zwsStripper = strings.NewReplacer(
 	"\u2009", "", // thin space
 )
 
+// reactionMediaRefRegex matches Garmin's placeholder format for "quoting" a
+// media message that has no text caption. The native apps emit something
+// like "\u2009📷(816CA11B-FD69-49AD-A849-2AE7121E215F)" — an optional thin
+// space, an icon (camera/microphone/etc.), and the media UUID in
+// parentheses. The captured group is the UUID.
+var reactionMediaRefRegex = regexp.MustCompile(`\(([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})\)$`)
+
+// extractMediaRefUUID returns the UUID from a Garmin media-reference target
+// text, or zero+false if the text isn't a media reference. The format is
+// reliably "<optional thin space><icon emoji>(<uuid>)" — the icon varies
+// per media type, so we anchor the parse on the trailing "(<uuid>)" only.
+func extractMediaRefUUID(target string) (uuid.UUID, bool) {
+	m := reactionMediaRefRegex.FindStringSubmatch(target)
+	if m == nil {
+		return uuid.Nil, false
+	}
+	id, err := uuid.Parse(m[1])
+	if err != nil {
+		return uuid.Nil, false
+	}
+	return id, true
+}
+
+// matchReactionMediaTarget scans `messages` for the media message that a
+// reaction targets, given the UUID extracted from the reaction's
+// media-reference target text. Garmin embeds either the message's UUID or
+// MediaID field in the reference (it varies, so we accept both). When
+// multiple candidates match, the one closest in time wins — same
+// tie-breaker as the text-matching path.
+func matchReactionMediaTarget(messages []gm.ConversationMessageModel, reactionMsg gm.MessageModel, mediaUUID uuid.UUID) *gm.ConversationMessageModel {
+	reactionTime := derefTime(reactionMsg.SentAt)
+	if reactionTime.IsZero() {
+		reactionTime = derefTime(reactionMsg.ReceivedAt)
+	}
+
+	var best *gm.ConversationMessageModel
+	bestDiff := time.Duration(math.MaxInt64)
+
+	for i := range messages {
+		c := &messages[i]
+		if c.MessageID == reactionMsg.MessageID {
+			continue
+		}
+		match := false
+		if c.MediaID != nil && *c.MediaID == mediaUUID {
+			match = true
+		} else if c.UUID != nil && *c.UUID == mediaUUID {
+			match = true
+		}
+		if !match {
+			continue
+		}
+		candTime := derefTime(c.SentAt)
+		if candTime.IsZero() {
+			candTime = derefTime(c.ReceivedAt)
+		}
+		diff := reactionTime.Sub(candTime)
+		if diff < 0 {
+			diff = -diff
+		}
+		if diff < bestDiff {
+			bestDiff = diff
+			best = c
+		}
+	}
+	return best
+}
+
 // matchReactionTarget scans `messages` for the message that a reaction most
 // likely targets, using the same algorithm as the gm-webclient frontend:
 //
@@ -422,9 +490,14 @@ func matchReactionTarget(messages []gm.ConversationMessageModel, reactionMsg gm.
 //
 // Garmin never populates parentMessageId on reaction messages — neither in
 // SignalR pushes nor in REST conversation detail responses — so the only
-// reliable resolution path is text-matching the quoted body against the
-// recent history. This mirrors what the gm-webclient frontend does in its
-// rendering layer.
+// reliable resolution path is content matching the quoted body against the
+// recent history. Two flavours:
+//
+//   - Text reactions (the common case): match the candidate body text after
+//     stripping ZWS-family characters, mirroring gm-webclient.
+//   - Media-reference reactions (caption-less images/audio): the target text
+//     is a placeholder like "📷(<media-uuid>)" — match the UUID against
+//     candidate messages' MediaID or UUID field instead.
 func resolveReactionParentFromMessages(msg gm.MessageModel, messages []gm.ConversationMessageModel) (networkid.MessageID, error) {
 	_, targetText, ok := extractReactionTarget(derefStr(msg.MessageBody))
 	if !ok {
@@ -433,6 +506,15 @@ func resolveReactionParentFromMessages(msg gm.MessageModel, messages []gm.Conver
 	if targetText == "" {
 		return "", fmt.Errorf("reaction %s has empty target text", msg.MessageID)
 	}
+
+	// Media reactions: target text is a "<icon>(<uuid>)" placeholder.
+	if mediaUUID, isMediaRef := extractMediaRefUUID(targetText); isMediaRef {
+		if target := matchReactionMediaTarget(messages, msg, mediaUUID); target != nil {
+			return networkid.MessageID(target.MessageID.String()), nil
+		}
+		return "", fmt.Errorf("no media message matched reaction %s media UUID %s", msg.MessageID, mediaUUID)
+	}
+
 	target := matchReactionTarget(messages, msg, targetText)
 	if target == nil {
 		return "", fmt.Errorf("no message matched reaction %s target text %q", msg.MessageID, targetText)
