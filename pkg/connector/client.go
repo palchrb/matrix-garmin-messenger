@@ -609,12 +609,14 @@ func (c *GarminClient) GetChatInfo(ctx context.Context, portal *bridgev2.Portal)
 
 	var chatMembers []bridgev2.ChatMember
 
-	// Add ourselves.
+	// Add ourselves. Sender is intentionally left empty: bridgev2's
+	// portal.go (sendConvertedMessage / member sync) only creates a ghost
+	// when Sender is non-empty. With IsFromMe=true and Sender=="" the
+	// framework maps the membership to the human user's MXID via double
+	// puppeting and never creates a ghost for our own number.
 	chatMembers = append(chatMembers, bridgev2.ChatMember{
 		EventSender: bridgev2.EventSender{
 			IsFromMe: true,
-			// Our own Hermes UUID derived from our phone number.
-			Sender: ghostIDFromHermesID(gm.PhoneToHermesUserID(c.phone)),
 		},
 		Membership: event.MembershipJoin,
 		PowerLevel: ptrInt(50),
@@ -683,9 +685,9 @@ func (c *GarminClient) chatInfoForRecipient(recipient string) *bridgev2.ChatInfo
 	recipientGhostID := ghostIDForRecipient(recipient)
 	chatMembers := []bridgev2.ChatMember{
 		{
+			// Sender intentionally empty — see GetChatInfo above.
 			EventSender: bridgev2.EventSender{
 				IsFromMe: true,
-				Sender:   ghostIDFromHermesID(gm.PhoneToHermesUserID(c.phone)),
 			},
 			Membership: event.MembershipJoin,
 			PowerLevel: ptrInt(50),
@@ -947,6 +949,15 @@ func (c *GarminClient) handleIncomingMessage(msg gm.MessageModel) {
 	// without an API call.
 	c.cacheRecentMessage(msg.ConversationID, messageModelToConversation(msg))
 
+	isFromMe := senderUUID == gm.PhoneToHermesUserID(c.phone)
+	eventSender := bridgev2.EventSender{IsFromMe: isFromMe}
+	if !isFromMe {
+		// Only set Sender for remote senders. When IsFromMe=true, leaving
+		// Sender empty tells bridgev2 to use the human user's MXID instead
+		// of creating a ghost for our own number.
+		eventSender.Sender = ghostIDFromHermesID(senderUUID)
+	}
+
 	c.userLogin.Bridge.QueueRemoteEvent(c.userLogin, &simplevent.Message[gm.MessageModel]{
 		EventMeta: simplevent.EventMeta{
 			Type: bridgev2.RemoteEventMessage,
@@ -962,12 +973,8 @@ func (c *GarminClient) handleIncomingMessage(msg gm.MessageModel) {
 				Receiver: c.userLogin.ID,
 			},
 			CreatePortal: true,
-			Sender: bridgev2.EventSender{
-				Sender: ghostIDFromHermesID(senderUUID),
-				// IsFromMe is true if the sender UUID matches our own.
-				IsFromMe: senderUUID == gm.PhoneToHermesUserID(c.phone),
-			},
-			Timestamp: derefTime(msg.SentAt),
+			Sender:       eventSender,
+			Timestamp:    derefTime(msg.SentAt),
 		},
 		Data:               msg,
 		ID:                 networkid.MessageID(msgIDStr),
@@ -1006,6 +1013,12 @@ func (c *GarminClient) handleIncomingReaction(msg gm.MessageModel, portalID netw
 			Msg("Could not resolve reaction parent — dropping")
 		return
 	}
+	isFromMe := senderUUID == gm.PhoneToHermesUserID(c.phone)
+	reactionSender := bridgev2.EventSender{IsFromMe: isFromMe}
+	if !isFromMe {
+		reactionSender.Sender = ghostIDFromHermesID(senderUUID)
+	}
+
 	c.userLogin.Bridge.QueueRemoteEvent(c.userLogin, &simplevent.Reaction{
 		EventMeta: simplevent.EventMeta{
 			Type: bridgev2.RemoteEventReaction,
@@ -1019,9 +1032,7 @@ func (c *GarminClient) handleIncomingReaction(msg gm.MessageModel, portalID netw
 				ID:       portalID,
 				Receiver: c.userLogin.ID,
 			},
-			Sender: bridgev2.EventSender{
-				Sender: networkid.UserID(senderUUID),
-			},
+			Sender:    reactionSender,
 			Timestamp: derefTime(msg.SentAt),
 		},
 		TargetMessage: parentID,
