@@ -125,6 +125,12 @@ func (sr *HermesSignalR) connect(ctx context.Context, hubURL string) (signalr.Co
 	sr.logger.Debug("SignalR connector: requesting access token")
 	token, err := sr.auth.AccessTokenFactory(ctx)
 	if err != nil {
+		// Notify the bridge layer so it can distinguish permanent auth
+		// failures (401/403) from transient errors and surface them to the
+		// Matrix user.
+		if sr.onError != nil {
+			sr.onError(err)
+		}
 		return nil, fmt.Errorf("getting access token: %w", err)
 	}
 	sr.logger.Debug("SignalR connector: token obtained", "length", len(token))
@@ -153,6 +159,21 @@ func (sr *HermesSignalR) connect(ctx context.Context, hubURL string) (signalr.Co
 		"status", resp.StatusCode, "body", truncate(string(body), 2000))
 
 	if resp.StatusCode != 200 {
+		// Surface 401/403 to the bridge as an APIError so the connector layer
+		// can detect permanent auth failures via errors.As.
+		if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+			authErr := &APIError{
+				StatusCode: resp.StatusCode,
+				Status:     resp.Status,
+				Body:       truncate(string(body), 500),
+				URL:        negotiateURL,
+				Method:     "POST",
+			}
+			if sr.onError != nil {
+				sr.onError(authErr)
+			}
+			return nil, authErr
+		}
 		return nil, fmt.Errorf("negotiate failed: %s %s", resp.Status, truncate(string(body), 500))
 	}
 
