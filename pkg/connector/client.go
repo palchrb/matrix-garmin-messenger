@@ -42,11 +42,11 @@ type GarminClient struct {
 	// routed to the same portal instead of creating a duplicate.
 	pendingConvPortals sync.Map // map[string]networkid.PortalKey
 
-	// initialSyncDone is set after Connect() has performed the initial catch-up
-	// sync. It is used so the OnOpen callback only triggers a reconnect catch-up
-	// when the SignalR connection is re-established (not on the first connect,
-	// where Connect() already handled the initial sync).
-	initialSyncDone bool
+	// openCount is incremented on every SignalR OnOpen callback. The first
+	// invocation corresponds to the initial connect (where Connect() has
+	// already run the initial catch-up); subsequent invocations are
+	// reconnects and trigger a backfill sync.
+	openCount atomic.Int32
 
 	// catchingUp prevents two catch-up syncs from running concurrently if
 	// OnOpen fires while a previous sync is still in progress.
@@ -124,7 +124,11 @@ func (c *GarminClient) Connect(ctx context.Context) {
 	if err := c.syncMissedMessages(ctx, true); err != nil {
 		c.log.Warn().Err(err).Msg("Initial catch-up sync failed")
 	}
-	c.initialSyncDone = true
+
+	// Force a member resync on existing portals so any stale ghost
+	// (e.g. our own self-ghost left over from older bridge builds) gets
+	// kicked. Cheap, runs in a goroutine.
+	go c.resyncAllPortalMembers(context.Background())
 
 	// Register all SignalR callbacks before starting.
 	c.sr.OnMessage(func(msg gm.MessageModel) {
@@ -136,14 +140,16 @@ func (c *GarminClient) Connect(ctx context.Context) {
 	})
 
 	c.sr.OnOpen(func() {
-		c.log.Info().Msg("SignalR connected to Garmin Messenger")
+		// The SignalR library calls OnOpen on every successful (re)connect,
+		// including the very first connect. Skip the first one because
+		// Connect() above already ran the initial catch-up — running it
+		// again here would just duplicate work.
+		isReconnect := c.openCount.Add(1) > 1
+		c.log.Info().Bool("is_reconnect", isReconnect).Msg("SignalR connected to Garmin Messenger")
 		c.userLogin.BridgeState.Send(status.BridgeState{
 			StateEvent: status.StateConnected,
 		})
-		// On reconnect (not the first connect), backfill anything we missed
-		// while the WebSocket was down. Run in a goroutine so the SignalR
-		// callback returns promptly.
-		if c.initialSyncDone {
+		if isReconnect {
 			go func() {
 				if err := c.syncMissedMessages(context.Background(), false); err != nil {
 					c.log.Warn().Err(err).Msg("Reconnect catch-up sync failed")
@@ -183,6 +189,45 @@ func (c *GarminClient) Connect(ctx context.Context) {
 	// The framework only sets the space room avatar on initial creation.
 	// Update it on every connect so it reflects the current bot avatar from config.
 	go c.ensureSpaceAvatar(ctx)
+}
+
+// resyncAllPortalMembers walks every portal owned by this user login and
+// re-runs GetChatInfo against the live network state, then calls
+// portal.UpdateInfo to push the result back into the room. This is run
+// once on startup to evict any stale ghosts left over from older bridge
+// builds — most importantly, the self-ghost that older versions
+// erroneously added by setting both IsFromMe and Sender on the same
+// EventSender.
+func (c *GarminClient) resyncAllPortalMembers(ctx context.Context) {
+	br := c.userLogin.Bridge
+	userPortals, err := br.DB.UserPortal.GetAllForLogin(ctx, c.userLogin.UserLogin)
+	if err != nil {
+		c.log.Warn().Err(err).Msg("Resync members: failed to list user portals")
+		return
+	}
+	c.log.Info().Int("portals", len(userPortals)).Msg("Resyncing portal members")
+	for _, up := range userPortals {
+		if ctx.Err() != nil {
+			return
+		}
+		portal, err := br.GetExistingPortalByKey(ctx, up.Portal)
+		if err != nil || portal == nil || portal.MXID == "" {
+			continue
+		}
+		// Synthetic phone:/email: portals can't be re-resolved here.
+		if strings.HasPrefix(string(portal.ID), "phone:") || strings.HasPrefix(string(portal.ID), "email:") {
+			continue
+		}
+		info, err := c.GetChatInfo(ctx, portal)
+		if err != nil {
+			c.log.Debug().Err(err).
+				Stringer("portal_key", up.Portal).
+				Msg("Resync members: GetChatInfo failed")
+			continue
+		}
+		portal.UpdateInfo(ctx, info, c.userLogin, nil, time.Time{})
+	}
+	c.log.Info().Msg("Portal member resync complete")
 }
 
 // ensureSpaceAvatar updates the space room's m.room.avatar to match the
