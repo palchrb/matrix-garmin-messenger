@@ -4,7 +4,10 @@ import (
 	"context"
 	"fmt"
 	"html"
+	"math"
+	"regexp"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
 	gm "github.com/yourusername/matrix-garmin-messenger/internal/hermes"
@@ -302,13 +305,42 @@ func (c *GarminClient) resolveMediaMessageDetails(ctx context.Context, msg gm.Me
 }
 
 // isReactionBody reports whether a Garmin message body is a reaction.
-// Garmin encodes reactions as: \u200b{emoji}\u200b to \u200a{quoted}\u200a
+// Garmin encodes reactions as: \u200b{emoji}\u200b {locale "to"} \u200a{quoted}\u200a
+// (iOS may additionally wrap the quoted text in guillemets «...» and truncate
+// long quotes with an ellipsis).
 func isReactionBody(s string) bool {
 	return strings.HasPrefix(s, "\u200b")
 }
 
-// extractReactionEmoji returns the emoji from a Garmin reaction body.
+// reactionBodyRegex matches the Garmin reaction format and captures the emoji
+// (group 1) and the quoted target text (group 2). The middle `.+?` allows for
+// any locale-specific connector word ("to", "à", "auf", etc.). Optional
+// guillemets «...» around the hair-spaced section handle iOS variants.
+var reactionBodyRegex = regexp.MustCompile(`^\x{200b}(.+?)\x{200b}.+?«?\x{200a}(.*?)\x{200a}»?$`)
+
+// extractReactionTarget parses a Garmin reaction body and returns the emoji
+// and the quoted target text. ok is false if the body is not a valid
+// reaction. Trailing ellipsis (… or ...) is stripped from the target text
+// because iOS truncates long quotes.
+func extractReactionTarget(body string) (emoji, target string, ok bool) {
+	m := reactionBodyRegex.FindStringSubmatch(body)
+	if m == nil {
+		return "", "", false
+	}
+	target = m[2]
+	target = strings.TrimSuffix(target, "\u2026") // …
+	target = strings.TrimSuffix(target, "...")
+	return m[1], target, true
+}
+
+// extractReactionEmoji returns just the emoji from a Garmin reaction body.
+// Used by callers that don't need the target text.
 func extractReactionEmoji(s string) string {
+	if emoji, _, ok := extractReactionTarget(s); ok {
+		return emoji
+	}
+	// Fallback for malformed bodies that still start with ZWS: take whatever
+	// is between the first two ZWS characters.
 	s = strings.TrimPrefix(s, "\u200b")
 	if idx := strings.Index(s, "\u200b"); idx >= 0 {
 		return s[:idx]
@@ -322,26 +354,115 @@ func buildReactionBody(emoji, originalBody string) string {
 	return "\u200b" + emoji + "\u200b to \u200a" + originalBody + "\u200a"
 }
 
-// resolveReactionParentID fetches the parentMessageId for a reaction message via REST.
-// SignalR pushes never include parentMessageId; the server populates it based on the
-// quoted body text, and it's only available in the conversation detail response.
+// zwsStripper removes the zero-width / hair / thin space characters that
+// Garmin native apps insert into reaction bodies. Used when comparing a
+// quoted target text to candidate message bodies.
+var zwsStripper = strings.NewReplacer(
+	"\u200a", "", // hair space
+	"\u200b", "", // zero-width space
+	"\u2009", "", // thin space
+)
+
+// matchReactionTarget scans `messages` for the message that a reaction most
+// likely targets, using the same algorithm as the gm-webclient frontend:
+//
+//   - Skip the reaction itself and any other reaction messages
+//   - Strip ZWS-family characters from candidate bodies before comparing
+//   - Accept exact match OR startsWith match (for iOS-truncated quotes)
+//   - Among multiple matches, pick the one with the smallest time distance
+//     from the reaction's sentAt
+//
+// Returns nil if no candidate matches. This is the fallback used when the
+// Garmin server does not populate parentMessageId on the reaction message
+// (which, in practice, is almost always).
+func matchReactionTarget(messages []gm.ConversationMessageModel, reactionMsg gm.MessageModel, targetText string) *gm.ConversationMessageModel {
+	if targetText == "" {
+		return nil
+	}
+	reactionTime := derefTime(reactionMsg.SentAt)
+	if reactionTime.IsZero() {
+		reactionTime = derefTime(reactionMsg.ReceivedAt)
+	}
+
+	var best *gm.ConversationMessageModel
+	bestDiff := time.Duration(math.MaxInt64)
+
+	for i := range messages {
+		c := &messages[i]
+		if c.MessageID == reactionMsg.MessageID {
+			continue
+		}
+		body := derefStr(c.MessageBody)
+		if body == "" || isReactionBody(body) {
+			continue
+		}
+		stripped := strings.TrimSpace(zwsStripper.Replace(body))
+		if stripped != targetText && !strings.HasPrefix(stripped, targetText) {
+			continue
+		}
+		candTime := derefTime(c.SentAt)
+		if candTime.IsZero() {
+			candTime = derefTime(c.ReceivedAt)
+		}
+		diff := reactionTime.Sub(candTime)
+		if diff < 0 {
+			diff = -diff
+		}
+		if diff < bestDiff {
+			bestDiff = diff
+			best = c
+		}
+	}
+	return best
+}
+
+// resolveReactionParentID determines which message a reaction targets.
+//
+// Garmin SignalR pushes do not include parentMessageId, and in practice the
+// REST conversation detail endpoint does not populate it for reactions
+// either. The reliable approach (matching what gm-webclient does in its UI)
+// is to fetch recent messages and text-match the reaction's quoted body
+// against them, picking the closest in time.
+//
+// Resolution order:
+//  1. msg.ParentMessageID if the SignalR push happened to include it (rare)
+//  2. parentMessageId from the REST detail entry for this reaction (rare)
+//  3. Text-match the quoted body against the recent message history
 func (c *GarminClient) resolveReactionParentID(ctx context.Context, msg gm.MessageModel) (networkid.MessageID, error) {
 	if msg.ParentMessageID != nil {
 		return networkid.MessageID(msg.ParentMessageID.String()), nil
 	}
+
 	detail, err := c.api.GetConversationDetail(ctx, msg.ConversationID, gm.WithDetailLimit(100))
 	if err != nil {
 		return "", fmt.Errorf("reaction parent lookup failed: %w", err)
 	}
+
+	// Check if the REST entry happens to carry parentMessageId.
 	for _, m := range detail.Messages {
-		if m.MessageID == msg.MessageID {
-			if m.ParentMessageID != nil {
-				return networkid.MessageID(m.ParentMessageID.String()), nil
-			}
-			break
+		if m.MessageID == msg.MessageID && m.ParentMessageID != nil {
+			return networkid.MessageID(m.ParentMessageID.String()), nil
 		}
 	}
-	return "", fmt.Errorf("parentMessageId not found for reaction %s", msg.MessageID)
+
+	// Fall back to body-text matching.
+	_, targetText, ok := extractReactionTarget(derefStr(msg.MessageBody))
+	if !ok {
+		return "", fmt.Errorf("reaction %s has malformed body", msg.MessageID)
+	}
+	if targetText == "" {
+		return "", fmt.Errorf("reaction %s has empty target text", msg.MessageID)
+	}
+	target := matchReactionTarget(detail.Messages, msg, targetText)
+	if target == nil {
+		return "", fmt.Errorf("no message matched reaction %s target text %q", msg.MessageID, targetText)
+	}
+	c.log.Debug().
+		Str("reaction_id", msg.MessageID.String()).
+		Str("matched_parent_id", target.MessageID.String()).
+		Str("target_text", targetText).
+		Msg("Resolved reaction parent via text matching")
+	return networkid.MessageID(target.MessageID.String()), nil
 }
 
 // resolveReactionOriginalBody fetches the message body of the target message for
