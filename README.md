@@ -6,6 +6,8 @@ Uses the [slush-dev/garmin-messenger](https://github.com/slush-dev/garmin-messen
 
 Send and receive messages between Matrix and any Garmin InReach device (Mini 2, Messenger, GPSMAP 67i, etc.) — no Garmin hardware required on your side.
 
+Support room on matrix: [#garmin:vibb.me](https://matrix.to/#/#garmin:vibb.me)
+
 ## Features
 
 - **Real-time messages** via SignalR WebSocket (`HermesSignalR`)
