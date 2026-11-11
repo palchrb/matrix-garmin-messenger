@@ -148,7 +148,7 @@ func (sr *HermesSignalR) connect(ctx context.Context, hubURL string) (signalr.Co
 	}
 	negReq.Header = headers.Clone()
 
-	resp, err := http.DefaultClient.Do(negReq)
+	resp, err := negotiateHTTPClient.Do(negReq)
 	if err != nil {
 		return nil, fmt.Errorf("negotiate request: %w", err)
 	}
@@ -401,6 +401,10 @@ func (r *hermesReceiver) ReceiveNonconversationalMessage(raw json.RawMessage) {
 		r.sr.onNonconversationalMessage(imei)
 	}
 }
+
+// negotiateHTTPClient bounds the SignalR negotiate request so a stalled server
+// cannot hang the (re)connect loop indefinitely.
+var negotiateHTTPClient = &http.Client{Timeout: 30 * time.Second}
 
 // slogAdapter adapts slog.Logger to the SignalR library's go-kit/log interface.
 // The library emits flat key-value pairs: "level", "debug", "ts", "...", "state", 1

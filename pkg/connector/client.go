@@ -781,15 +781,31 @@ func avatarFromURL(url string) *bridgev2.Avatar {
 			if err != nil {
 				return nil, err
 			}
-			resp, err := http.DefaultClient.Do(req)
+			resp, err := avatarHTTPClient.Do(req)
 			if err != nil {
 				return nil, err
 			}
 			defer resp.Body.Close()
-			return io.ReadAll(resp.Body)
+			if resp.StatusCode != http.StatusOK {
+				return nil, fmt.Errorf("avatar download: HTTP %d", resp.StatusCode)
+			}
+			// The URL comes from Garmin data; cap the size so a bogus or hostile
+			// URL can't make us buffer an arbitrarily large body.
+			data, err := io.ReadAll(io.LimitReader(resp.Body, maxAvatarBytes+1))
+			if err != nil {
+				return nil, err
+			}
+			if len(data) > maxAvatarBytes {
+				return nil, fmt.Errorf("avatar download: larger than %d bytes", maxAvatarBytes)
+			}
+			return data, nil
 		},
 	}
 }
+
+const maxAvatarBytes = 5 << 20 // 5 MiB
+
+var avatarHTTPClient = &http.Client{Timeout: 30 * time.Second}
 
 // IsThisUser checks whether a ghost ID belongs to the logged-in user.
 func (c *GarminClient) IsThisUser(_ context.Context, userID networkid.UserID) bool {
