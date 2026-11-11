@@ -1,8 +1,8 @@
 module github.com/yourusername/matrix-garmin-messenger
 
-go 1.24.0
+go 1.26
 
-toolchain go1.24.7
+toolchain go1.27.4
 
 require (
 	github.com/google/uuid v1.6.0
