@@ -23,7 +23,7 @@ Support room on matrix: [#garmin:vibb.me](https://matrix.to/#/#garmin:vibb.me)
 
 - A phone number registered with the [Garmin Messenger app](https://explore.garmin.com/en-US/inreach/) (free)
 - A Matrix homeserver with appservice support (Synapse, Conduit, Dendrite)
-- Go 1.24+
+- Go 1.27.3+ or 1.26.10+ (older versions trust the compromised eMudhra CA keys; with an older Go installed, `go build` downloads the toolchain pinned in `go.mod`)
 
 ## Building
 
