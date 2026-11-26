@@ -639,7 +639,7 @@ const file_gm_android_checkin_proto_rawDesc = "" +
 	"\x11DEVICE_ANDROID_OS\x10\x01\x12\x11\n" +
 	"\rDEVICE_IOS_OS\x10\x02\x12\x19\n" +
 	"\x15DEVICE_CHROME_BROWSER\x10\x03\x12\x14\n" +
-	"\x10DEVICE_CHROME_OS\x10\x04B<H\x03Z8github.com/yourusername/matrix-garmin-messenger/internal/hermes/internal/checkinpb"
+	"\x10DEVICE_CHROME_OS\x10\x04BDH\x03Z@github.com/palchrb/matrix-xplora/internal/fcm/internal/checkinpb"
 
 var (
 	file_gm_android_checkin_proto_rawDescOnce sync.Once

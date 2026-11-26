@@ -12,9 +12,6 @@ RUN go mod download
 
 COPY . .
 
-# Re-apply replace in case go.mod was overwritten by COPY . .
-RUN go mod edit -replace github.com/slush-dev/garmin-messenger=/garmin-messenger/lib/go
-
 # Robust fix:
 #  - Remove possible CRLF line endings
 #  - Ensure executable bit
