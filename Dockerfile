@@ -20,7 +20,7 @@ RUN sed -i 's/\r$//' ./build.sh \
  && chmod +x ./build.sh \
  && ./build.sh
 
-FROM alpine:3.23
+FROM alpine:3.24
 
 ENV UID=1337 \
     GID=1337
