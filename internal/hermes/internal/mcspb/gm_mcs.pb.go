@@ -1719,7 +1719,7 @@ const file_gm_mcs_proto_rawDesc = "" +
 	"\rimmediate_ack\x18\x18 \x01(\bR\fimmediateAck\"\v\n" +
 	"\tStreamAck\"\x1e\n" +
 	"\fSelectiveAck\x12\x0e\n" +
-	"\x02id\x18\x01 \x03(\tR\x02idB8H\x03Z4github.com/yourusername/matrix-garmin-messenger/internal/hermes/internal/mcspb"
+	"\x02id\x18\x01 \x03(\tR\x02idB@H\x03Z<github.com/palchrb/matrix-xplora/internal/fcm/internal/mcspb"
 
 var (
 	file_gm_mcs_proto_rawDescOnce sync.Once

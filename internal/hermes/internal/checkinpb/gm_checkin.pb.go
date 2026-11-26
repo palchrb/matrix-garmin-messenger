@@ -515,7 +515,7 @@ const file_gm_checkin_proto_rawDesc = "" +
 	"\n" +
 	"android_id\x18\a \x01(\x06R\tandroidId\x12%\n" +
 	"\x0esecurity_token\x18\b \x01(\x06R\rsecurityToken\x12!\n" +
-	"\fversion_info\x18\v \x01(\tR\vversionInfoB<H\x03Z8github.com/yourusername/matrix-garmin-messenger/internal/hermes/internal/checkinpb"
+	"\fversion_info\x18\v \x01(\tR\vversionInfoBDH\x03Z@github.com/palchrb/matrix-xplora/internal/fcm/internal/checkinpb"
 
 var (
 	file_gm_checkin_proto_rawDescOnce sync.Once

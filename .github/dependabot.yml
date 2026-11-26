@@ -1,0 +1,34 @@
+# Monthly dependency PRs (1st of each month), grouped so there are only a
+# few to review.
+# mautrix releases around the 16th each month and can change bridgev2 APIs,
+# so it gets its own PR; test it against a real homeserver before merging.
+version: 2
+updates:
+  - package-ecosystem: gomod
+    directory: /
+    schedule:
+      interval: monthly
+    groups:
+      mautrix:
+        patterns: ["maunium.net/go/mautrix", "go.mau.fi/*"]
+      go-deps:
+        patterns: ["*"]
+        exclude-patterns: ["maunium.net/go/mautrix", "go.mau.fi/*"]
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
+    groups:
+      actions:
+        patterns: ["*"]
+
+  # Base images (golang:1.27-alpine3.23, alpine:3.23). Proposes the next Go
+  # major / Alpine release; patch releases are picked up by the weekly rebuild.
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: monthly
+    groups:
+      docker:
+        patterns: ["*"]
